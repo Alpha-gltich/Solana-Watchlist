@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Watchlist — Solana Token Tracker</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #14171c;
+    --panel-border: #24282f;
+    --text: #e7e9ec;
+    --text-dim: #8b919c;
+    --accent: #7dffb3;
+    --accent-dim: #2c4a3a;
+    --danger: #ff6b6b;
+    --mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+  }
+
+  .wrap {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+  }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 32px;
+    gap: 12px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .brand .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    display: inline-block;
+    box-shadow: 0 0 8px var(--accent);
+  }
+
+  .brand h1 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+
+  .brand .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  button {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    padding: 9px 16px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #connectBtn {
+    background: var(--panel);
+    color: var(--text);
+  }
+  #connectBtn:hover { border-color: var(--accent-dim); }
+  #connectBtn.connected {
+    background: var(--accent-dim);
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+
+  .panel h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin: 0 0 14px;
+    font-weight: 600;
+  }
+
+  .add-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  input[type="text"] {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  input[type="text"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-color: var(--accent);
+  }
+  input[type="text"]::placeholder { color: var(--text-dim); }
+
+  .add-row button {
+    background: var(--accent);
+    color: #06130c;
+    white-space: nowrap;
+  }
+  .add-row button:hover { background: #93ffc2; }
+  .add-row button:disabled {
+    background: var(--panel-border);
+    color: var(--text-dim);
+    cursor: not-allowed;
+  }
+
+  .hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 8px;
+    min-height: 16px;
+  }
+  .hint.error { color: var(--danger); }
+  .hint.success { color: var(--accent); }
+
+  .empty {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-dim);
+  }
+  .empty .glyph {
+    font-family: var(--mono);
+    font-size: 24px;
+    margin-bottom: 8px;
+    opacity: 0.5;
+  }
+  .empty p { margin: 4px 0; font-size: 13px; }
+
+  .token-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 4px;
+    border-bottom: 1px solid var(--panel-border);
+    gap: 12px;
+  }
+  .token-row:last-child { border-bottom: none; }
+
+  .token-addr {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+  .token-addr .full { display: none; }
+
+  .token-price {
+    font-family: var(--mono);
+    font-size: 13px;
+    text-align: right;
+    min-width: 90px;
+  }
+  .token-price .loading { color: var(--text-dim); }
+  .token-price .val { color: var(--accent); }
+  .token-price .err { color: var(--text-dim); font-size: 11px; }
+
+  .connect-gate {
+    text-align: center;
+    padding: 60px 20px;
+  }
+  .connect-gate .glyph {
+    font-size: 32px;
+    margin-bottom: 12px;
+  }
+  .connect-gate h2 {
+    font-size: 16px;
+    color: var(--text);
+    margin: 0 0 6px;
+    text-transform: none;
+    letter-spacing: normal;
+  }
+  .connect-gate p {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin: 0 0 20px;
+  }
+  .connect-gate button {
+    background: var(--accent);
+    color: #06130c;
+    padding: 11px 22px;
+    font-size: 14px;
+  }
+  .connect-gate button:hover { background: #93ffc2; }
+
+  .status-banner {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    display: none;
+    align-items: center;
+    gap: 8px;
+  }
+  .status-banner.show { display: flex; }
+  .status-banner.pending {
+    background: rgba(125,255,179,0.08);
+    border: 1px solid var(--accent-dim);
+    color: var(--accent);
+  }
+  .status-banner.error {
+    background: rgba(255,107,107,0.08);
+    border: 1px solid #4a2c2c;
+    color: var(--danger);
+  }
+
+  .spin {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  footer {
+    text-align: center;
+    margin-top: 24px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  footer a { color: var(--text-dim); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spin { animation: none; }
+    * { transition: none !important; }
+  }
+
+  @media (max-width: 420px) {
+    .add-row { flex-direction: column; }
+    .token-addr .short { display: none; }
+    .token-addr .full { display: inline; word-break: break-all; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <div>
+        <h1>Watchlist</h1>
+      </div>
+      <span class="tag">devnet · local</span>
+    </div>
+    <button id="connectBtn">Connect Phantom</button>
+  </header>
+
+  <div id="statusBanner" class="status-banner">
+    <span class="spin"></span>
+    <span id="statusText"></span>
+  </div>
+
+  <div id="gate" class="connect-gate panel">
+    <div class="glyph">◇</div>
+    <h2>No wallet connected</h2>
+    <p>Connect Phantom to view and manage your on-chain token watchlist.</p>
+    <button id="connectBtn2">Connect Phantom</button>
+  </div>
+
+  <div id="app" style="display:none;">
+    <div class="panel">
+      <h2>Add a token</h2>
+      <div class="add-row">
+        <input type="text" id="tokenInput" placeholder="Paste a Solana token mint address" autocomplete="off" spellcheck="false">
+        <button id="addBtn">Add</button>
+      </div>
+      <div id="addHint" class="hint"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Your watchlist</h2>
+      <div id="listContainer">
+        <div class="empty">
+          <div class="glyph">···</div>
+          <p>Nothing tracked yet.</p>
+          <p>Add a token address above to start.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    program: GqCd…qpAs · <a href="#" id="refreshLink">refresh prices</a>
+  </footer>
+</div>
+<script src="https://bundle.run/buffer@6.0.3"></script>
+<script>window.Buffer = buffer.Buffer;</script>
+<script src="https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js"></script>
+<script>
+(function () {
+  const PROGRAM_ID = "GqCdeBcZwZVbrSz6R1zPhrKRscAjHpgtabXEr6aPqpAs";
+  const RPC_URL = "http://127.0.0.1:8899";
+
+  const { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram } = solanaWeb3;
+  const connection = new Connection(RPC_URL, "confirmed");
+  const programId = new PublicKey(PROGRAM_ID);
+
+  // Anchor instruction discriminator = first 8 bytes of sha256("global:<ix_name>")
+  async function anchorDiscriminator(ixName) {
+    const enc = new TextEncoder().encode("global:" + ixName);
+    const hashBuf = await crypto.subtle.digest("SHA-256", enc);
+    return new Uint8Array(hashBuf).slice(0, 8);
+  }
+
+  function findWatchlistPda(ownerPubkey) {
+    const [pda] = PublicKey.findProgramAddressSync(
+      [new TextEncoder().encode("watchlist"), ownerPubkey.toBuffer()],
+      programId
+    );
+    return pda;
+  }
+
+  const connectBtn = document.getElementById('connectBtn');
+  const connectBtn2 = document.getElementById('connectBtn2');
+  const gate = document.getElementById('gate');
+  const app = document.getElementById('app');
+  const tokenInput = document.getElementById('tokenInput');
+  const addBtn = document.getElementById('addBtn');
+  const addHint = document.getElementById('addHint');
+  const listContainer = document.getElementById('listContainer');
+  const statusBanner = document.getElementById('statusBanner');
+  const statusText = document.getElementById('statusText');
+  const refreshLink = document.getElementById('refreshLink');
+
+  let walletPubkey = null;
+  let tokens = []; // array of base58 strings, loaded from chain
+
+  // ---------- helpers ----------
+
+  function shortenAddr(addr) {
+    if (addr.length <= 10) return addr;
+    return addr.slice(0, 4) + '…' + addr.slice(-4);
+  }
+
+  function isLikelySolanaAddress(str) {
+    // Base58 alphabet, typical pubkey length 32-44 chars
+    const base58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+    return base58.test(str.trim());
+  }
+
+  function showStatus(msg, type) {
+    statusText.textContent = msg;
+    statusBanner.className = 'status-banner show ' + type;
+  }
+  function hideStatus() {
+    statusBanner.className = 'status-banner';
+  }
+
+  function setHint(msg, type) {
+    addHint.textContent = msg;
+    addHint.className = 'hint' + (type ? ' ' + type : '');
+  }
+
+  // ---------- wallet connect ----------
+
+  async function connectWallet() {
+    if (!window.solana || !window.solana.isPhantom) {
+      setHint('Phantom wallet not found. Install it from phantom.app first.', 'error');
+      return;
+    }
+    try {
+      showStatus('Connecting to Phantom…', 'pending');
+      const resp = await window.solana.connect();
+      walletPubkey = resp.publicKey.toString();
+      hideStatus();
+      onConnected();
+    } catch (err) {
+      hideStatus();
+      console.error(err);
+      setHint('Connection was cancelled or failed.', 'error');
+    }
+  }
+
+  function onConnected() {
+    gate.style.display = 'none';
+    app.style.display = 'block';
+    connectBtn.textContent = shortenAddr(walletPubkey);
+    connectBtn.classList.add('connected');
+    loadWatchlist();
+  }
+
+  connectBtn.addEventListener('click', () => {
+    if (!walletPubkey) connectWallet();
+  });
+  connectBtn2.addEventListener('click', connectWallet);
+
+  // ---------- on-chain reads/writes ----------
+  // NOTE: This is a minimal, dependency-free scaffold.
+  // Wiring the actual Anchor instruction calls (add_token, and reading
+  // the Watchlist PDA) requires the @solana/web3.js + Anchor client
+  // libraries loaded via CDN — that's the next piece we'll wire in.
+
+  // Parses the raw account data for our Watchlist struct:
+  // 8 bytes discriminator + 32 bytes authority (Pubkey) + 4 bytes vec-len + (32 bytes * N) tokens
+  function parseWatchlistAccount(dataBuffer) {
+    const buf = Uint8Array.from(dataBuffer);
+    if (buf.length < 8 + 32 + 4) return [];
+    let offset = 8 + 32; // skip discriminator + authority
+    const vecLen = new DataView(buf.buffer, buf.byteOffset + offset, 4).getUint32(0, true);
+    offset += 4;
+    const out = [];
+    for (let i = 0; i < vecLen; i++) {
+      const slice = buf.slice(offset, offset + 32);
+      out.push(new PublicKey(slice).toBase58());
+      offset += 32;
+    }
+    return out;
+  }
+
+  async function loadWatchlist() {
+    try {
+      const ownerPubkey = new PublicKey(walletPubkey);
+      const pda = findWatchlistPda(ownerPubkey);
+      const accountInfo = await connection.getAccountInfo(pda);
+      if (!accountInfo) {
+        tokens = [];
+        renderList([]);
+        return;
+      }
+      tokens = parseWatchlistAccount(accountInfo.data);
+      renderList(tokens);
+    } catch (err) {
+      console.error('Failed to load watchlist:', err);
+      renderList([]);
+    }
+  }
+
+  async function addToken(address) {
+    const ownerPubkey = new PublicKey(walletPubkey);
+    const pda = findWatchlistPda(ownerPubkey);
+    const tokenPubkey = new PublicKey(address);
+
+    const discriminator = await anchorDiscriminator("add_token");
+    const data = new Uint8Array(8 + 32);
+    data.set(discriminator, 0);
+    data.set(tokenPubkey.toBytes(), 8);
+
+    const ix = new TransactionInstruction({
+      programId,
+      keys: [
+        { pubkey: ownerPubkey, isSigner: true, isWritable: true },
+        { pubkey: pda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from(data),
+    });
+
+    showStatus('Waiting for wallet approval…', 'pending');
+    const tx = new Transaction().add(ix);
+    tx.feePayer = ownerPubkey;
+    const { blockhash } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+
+    const signed = await window.solana.signTransaction(tx);
+
+    showStatus('Confirming transaction…', 'pending');
+    const sig = await connection.sendRawTransaction(signed.serialize());
+    await connection.confirmTransaction(sig, 'confirmed');
+
+    hideStatus();
+    await loadWatchlist();
+    setHint('Added. Fetching price…', 'success');
+    fetchPriceFor(address);
+  }
+
+  // ---------- price fetching ----------
+
+  async function fetchPriceFor(address) {
+    const row = document.querySelector(`[data-addr="${address}"] .token-price`);
+    if (!row) return;
+    row.innerHTML = '<span class="loading">loading…</span>';
+    try {
+      // Jupiter price API v2
+      const res = await fetch(`https://lite-api.jup.ag/price/v3?ids=${address}`);
+      const data = await res.json();
+      const price = data && data[address] ? data[address].usdPrice : null;
+      if (price) {
+        row.innerHTML = `<span class="val">$${Number(price).toFixed(6)}</span>`;
+      } else {
+        row.innerHTML = `<span class="err">no price data</span>`;
+      }
+    } catch (err) {
+      row.innerHTML = `<span class="err">price unavailable</span>`;
+    }
+  }
+
+  function refreshAllPrices() {
+    tokens.forEach(fetchPriceFor);
+  }
+
+  // ---------- rendering ----------
+
+  function renderList(list) {
+    if (!list.length) {
+      listContainer.innerHTML = `
+        <div class="empty">
+          <div class="glyph">···</div>
+          <p>Nothing tracked yet.</p>
+          <p>Add a token address above to start.</p>
+        </div>`;
+      return;
+    }
+    listContainer.innerHTML = list.map(addr => `
+      <div class="token-row" data-addr="${addr}">
+        <span class="token-addr">
+          <span class="short">${shortenAddr(addr)}</span>
+          <span class="full">${addr}</span>
+        </span>
+        <span class="token-price"><span class="loading">loading…</span></span>
+      </div>
+    `).join('');
+    list.forEach(fetchPriceFor);
+  }
+
+  // ---------- add token flow ----------
+
+  addBtn.addEventListener('click', handleAdd);
+  tokenInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleAdd();
+  });
+
+  function handleAdd() {
+    const val = tokenInput.value.trim();
+    setHint('', '');
+
+    if (!val) {
+      setHint('Paste a token address first.', 'error');
+      return;
+    }
+    if (!isLikelySolanaAddress(val)) {
+      setHint('That doesn\'t look like a valid Solana address.', 'error');
+      return;
+    }
+    if (tokens.includes(val)) {
+      setHint('Already on your watchlist.', 'error');
+      return;
+    }
+    if (tokens.length >= 10) {
+      setHint('Watchlist is full (10 tokens max).', 'error');
+      return;
+    }
+
+    addBtn.disabled = true;
+    addToken(val)
+      .then(() => {
+        tokenInput.value = '';
+      })
+      .catch((err) => {
+        console.error(err);
+        hideStatus();
+        if (err && err.message && err.message.includes('User rejected')) {
+          setHint('Transaction was rejected in Phantom.', 'error');
+        } else {
+          setHint('Transaction failed. Check console for details.', 'error');
+        }
+      })
+      .finally(() => {
+        addBtn.disabled = false;
+      });
+  }
+
+  refreshLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    refreshAllPrices();
+  });
+
+})();
+</script>
+
+</body>
+</html>
