@@ -288,7 +288,7 @@
       <div>
         <h1>Watchlist</h1>
       </div>
-      <span class="tag">devnet · local</span>
+      <span class="tag">devnet</span>
     </div>
     <button id="connectBtn">Connect Phantom</button>
   </header>
@@ -337,7 +337,7 @@
 <script>
 (function () {
   const PROGRAM_ID = "GqCdeBcZwZVbrSz6R1zPhrKRscAjHpgtabXEr6aPqpAs";
-  const RPC_URL = "http://127.0.0.1:8899";
+  const RPC_URL = "https://api.devnet.solana.com";
 
   const { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram } = solanaWeb3;
   const connection = new Connection(RPC_URL, "confirmed");
