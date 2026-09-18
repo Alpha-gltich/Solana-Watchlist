@@ -16,9 +16,15 @@ pub struct AddToken<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handle_add_token(ctx: Context<AddToken>, token: Pubkey) -> Result<()> {
+pub fn handle_add_token(ctx: Context<AddToken>, token: Pubkey, telegram_chat_id: i64) -> Result<()> {
     let watchlist = &mut ctx.accounts.watchlist;
-    watchlist.authority = ctx.accounts.payer.key();
+
+    if watchlist.authority == Pubkey::default() {
+        // First-time initialization only — never overwrite on later calls
+        watchlist.authority = ctx.accounts.payer.key();
+        watchlist.telegram_chat_id = telegram_chat_id;
+    }
+
     if !watchlist.tokens.contains(&token) {
         watchlist.tokens.push(token);
     }

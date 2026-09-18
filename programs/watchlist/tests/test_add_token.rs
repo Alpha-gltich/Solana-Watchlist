@@ -30,10 +30,15 @@ fn test_add_token() {
     svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
 
     let fake_token = Pubkey::new_unique();
+    let fake_chat_id: i64 = 123456789;
 
     let instruction = Instruction::new_with_bytes(
         program_id,
-        &watchlist::instruction::AddToken { token: fake_token }.data(),
+        &watchlist::instruction::AddToken {
+            token: fake_token,
+            telegram_chat_id: fake_chat_id,
+        }
+        .data(),
         watchlist::accounts::AddToken {
             payer: payer.pubkey(),
             watchlist: watchlist_pda,
@@ -53,7 +58,7 @@ fn test_add_token() {
     let watchlist_state = watchlist::state::Watchlist::try_deserialize(&mut data).unwrap();
 
     assert_eq!(watchlist_state.authority, payer.pubkey());
+    assert_eq!(watchlist_state.telegram_chat_id, fake_chat_id);
     assert_eq!(watchlist_state.tokens.len(), 1);
     assert_eq!(watchlist_state.tokens[0], fake_token);
 }
-
