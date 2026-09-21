@@ -1,3 +1,7 @@
+const dns = require("dns");
+// This network's IPv6 route to Telegram is dead, so resolve IPv4 first.
+dns.setDefaultResultOrder("ipv4first");
+
 const fs = require("fs");
 const path = require("path");
 const { Connection, PublicKey } = require("@solana/web3.js");
@@ -11,15 +15,35 @@ if (!RPC_URL || !RPC_URL.startsWith("https://") || !RPC_URL.includes("devnet")) 
   );
 }
 
+// --- Telegram config: fail loudly ---------------------------------------------
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+if (!TG_TOKEN || !TG_CHAT_ID) {
+  throw new Error(
+    "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must both be set in .env. " +
+      "Run from the repo root: node --env-file=.env scripts/indexer.js"
+  );
+}
+if (!/^-?\d+$/.test(TG_CHAT_ID)) {
+  throw new Error("TELEGRAM_CHAT_ID must be a number (e.g. 8896107191).");
+}
+
 // --- Secret scrubbing ---------------------------------------------------------
-// The API key is the last path segment of the RPC URL. Any error text that might
-// contain the URL or the key goes through scrub() before it is printed.
+// Any text that might contain the RPC URL, the RPC key, or the bot token goes
+// through scrub() before it is printed. The Alchemy key is the last path segment
+// of the RPC URL. The bot token sits in the Telegram request URL.
 const RPC_KEY = new URL(RPC_URL).pathname.split("/").filter(Boolean).pop() || "";
+const SECRETS = [
+  [RPC_URL, "[RPC_URL]"],
+  [RPC_KEY, "[KEY]"],
+  [TG_TOKEN, "[TG_TOKEN]"],
+];
 
 function scrub(value) {
   let text = String(value);
-  text = text.split(RPC_URL).join("[RPC_URL]");
-  if (RPC_KEY) text = text.split(RPC_KEY).join("[KEY]");
+  for (const [secret, label] of SECRETS) {
+    if (secret) text = text.split(secret).join(label);
+  }
   return text;
 }
 
@@ -46,11 +70,17 @@ const STATS_EVERY_MS = 30_000;
 const NO_SUCCESS_LIMIT_MS = 60_000; // no successful poll for this long: exit loudly
 const MINT_ACCOUNT_SIZE = 82; // SPL Token Mint account layout
 const MAX_KEYS_PER_CALL = 100; // getMultipleAccounts limit
+const TG_ATTEMPTS = 4; // send tries per message
+const TG_TIMEOUT_MS = 5_000; // per attempt
+const BASELINE_ATTEMPTS = 6; // startup read tries before giving up
+const BASELINE_RETRY_MS = 3_000;
 
 // Anchored to this file's folder, not the directory node was launched from.
 const WATCHED_MINTS_FILE = path.join(__dirname, "watched_mints.json");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const stats = { polls: 0, failed: 0, alerts: 0, tgSent: 0, tgFailed: 0 };
 
 function loadWatchedMints() {
   if (!fs.existsSync(WATCHED_MINTS_FILE)) {
@@ -67,6 +97,67 @@ function loadWatchedMints() {
       throw new Error("Invalid mint address in watched_mints.json: " + address);
     }
   });
+}
+
+// --- Telegram sending ---------------------------------------------------------
+// One attempt. Throws on network failure, timeout, or a non-ok Telegram reply.
+async function telegramRequest(text) {
+  const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: TG_CHAT_ID,
+      text,
+      link_preview_options: { is_disabled: true },
+    }),
+    signal: AbortSignal.timeout(TG_TIMEOUT_MS),
+  });
+  let json = null;
+  try {
+    json = await res.json();
+  } catch {
+    // non-JSON body; handled below
+  }
+  if (res.ok && json && json.ok) return;
+
+  const err = new Error(
+    `Telegram HTTP ${res.status}: ${(json && json.description) || "no description"}`
+  );
+  err.status = res.status;
+  const retryAfter = json && json.parameters && json.parameters.retry_after;
+  err.retryAfterMs = retryAfter ? retryAfter * 1000 : 0;
+  throw err;
+}
+
+// Retries a few times, then gives up LOUDLY. Never throws, so it can never stop
+// the polling loop. 4xx errors (except 429) are permanent, so they are not retried.
+async function sendTelegram(text, label) {
+  for (let attempt = 1; attempt <= TG_ATTEMPTS; attempt++) {
+    try {
+      await telegramRequest(text);
+      stats.tgSent++;
+      if (attempt > 1) console.log(`Telegram send OK (${label}) on attempt ${attempt}.`);
+      return true;
+    } catch (err) {
+      const permanent = err.status >= 400 && err.status < 500 && err.status !== 429;
+      console.error(
+        `TELEGRAM SEND FAILED (${label}, attempt ${attempt}/${TG_ATTEMPTS}):`,
+        describeError(err)
+      );
+      if (permanent || attempt === TG_ATTEMPTS) break;
+      await sleep(err.retryAfterMs || 1000 * 2 ** (attempt - 1));
+    }
+  }
+  stats.tgFailed++;
+  console.error(`!!! TELEGRAM DELIVERY FAILED (${label}): this message is NOT on your phone !!!`);
+  return false;
+}
+
+// Fire and forget: polling must never wait on Telegram.
+function notify(text, label) {
+  sendTelegram(text, label).catch((err) =>
+    console.error("TELEGRAM INTERNAL ERROR:", describeError(err))
+  );
 }
 
 // --- Mint account parsing -----------------------------------------------------
@@ -101,7 +192,6 @@ function parseMint(account) {
 // --- State ---------------------------------------------------------------------
 const state = new Map(); // mint address -> { mintAuthority, freezeAuthority }
 const warnedUnreadable = new Set(); // report an unreadable mint once, not every poll
-const stats = { polls: 0, failed: 0, alerts: 0 };
 let highestSlot = 0;
 let lastSuccessAt = Date.now();
 
@@ -128,17 +218,48 @@ async function fetchAccounts(connection, mints) {
   return results;
 }
 
+// The first read must succeed, but one network hiccup must not kill startup.
+// Only the fetch is retried. A mint that is unreadable for a permanent reason
+// (not found, wrong program) still fails loudly in applyAccounts.
+async function fetchBaselineAccounts(connection, mints) {
+  for (let attempt = 1; attempt <= BASELINE_ATTEMPTS; attempt++) {
+    try {
+      return await fetchAccounts(connection, mints);
+    } catch (err) {
+      console.error(
+        `BASELINE READ FAILED (attempt ${attempt}/${BASELINE_ATTEMPTS}):`,
+        describeError(err)
+      );
+      if (attempt === BASELINE_ATTEMPTS) throw err;
+      await sleep(BASELINE_RETRY_MS);
+    }
+  }
+}
+
 function describeAuthority(value) {
   return value === null ? "none" : value;
 }
 
 function raiseAlert(mintAddress, changes) {
   stats.alerts++;
+  const detected = new Date().toISOString();
+  const explorer = `https://explorer.solana.com/address/${mintAddress}?cluster=devnet`;
+
+  // Terminal alert always prints first, whatever Telegram does.
   console.log("\n🚨 ALERT: Authority change on watched mint!");
   console.log("Mint:", mintAddress);
   for (const change of changes) console.log("  -", change);
-  console.log("Detected:", new Date().toISOString());
-  console.log(`Explorer: https://explorer.solana.com/address/${mintAddress}?cluster=devnet\n`);
+  console.log("Detected:", detected);
+  console.log(`Explorer: ${explorer}\n`);
+
+  const lines = [
+    "🚨 Aegis alert: authority change (devnet)",
+    `Mint: ${mintAddress}`,
+    ...changes.map((c) => `- ${c}`),
+    `Detected: ${detected}`,
+    `Explorer: ${explorer}`,
+  ];
+  notify(lines.join("\n"), `alert ${mintAddress}`);
 }
 
 const FIELDS = [
@@ -197,7 +318,7 @@ async function main() {
   console.log("HTTP host:", new URL(RPC_URL).host);
   console.log(`Watching ${mints.length} mint(s), polling every ${POLL_INTERVAL_MS / 1000}s.`);
 
-  applyAccounts(mints, await fetchAccounts(connection, mints), true);
+  applyAccounts(mints, await fetchBaselineAccounts(connection, mints), true);
   lastSuccessAt = Date.now();
 
   console.log("Baseline recorded:");
@@ -209,6 +330,9 @@ async function main() {
     );
   }
   console.log("Monitoring for authority changes...\n");
+
+  // Proves the Telegram path at boot instead of discovering it is broken at alert time.
+  notify(`Aegis started: watching ${mints.length} mint(s) on devnet.`, "startup");
 
   let lastStatsAt = Date.now();
   while (true) {
@@ -232,13 +356,15 @@ async function main() {
     if (now - lastStatsAt >= STATS_EVERY_MS) {
       lastStatsAt = now;
       console.log(
-        `[stats] polls=${stats.polls} failed=${stats.failed} alerts=${stats.alerts} slot=${highestSlot}`
+        `[stats] polls=${stats.polls} failed=${stats.failed} alerts=${stats.alerts} ` +
+          `tg_sent=${stats.tgSent} tg_failed=${stats.tgFailed} slot=${highestSlot}`
       );
     }
   }
 }
 
 main().catch((err) => {
-  console.error("Indexer failed:", scrub((err && err.stack) || err));
+  console.error("Indexer failed:", describeError(err));
+  console.error(scrub((err && err.stack) || err));
   process.exit(1);
 });
