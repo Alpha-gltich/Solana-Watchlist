@@ -9,3 +9,5 @@ test-ledger
 **/id.json
 **/*keypair*.json
 .env
+
+.baseline.json*

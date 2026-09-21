@@ -21,6 +21,7 @@ Tested live on devnet with fresh test mints, with the alert confirmed arriving o
 - mint authority revoked
 - freeze authority revoked
 - freeze authority moved to a different address
+- freeze authority revoked while the monitor was stopped: the alert fired at the next start
 
 Telegram delivery was tested on a network with intermittent timeouts. The retry logic recovered the send in those runs.
 
@@ -33,7 +34,7 @@ Not tested yet:
 ## Known limits
 
 - Polling every 5 seconds. End-to-end alert latency has not been measured.
-- The baseline lives in memory only. Authority changes made while the monitor is down are missed.
+- The baseline is saved to `scripts/.baseline.json` (gitignored). A mint with no saved baseline starts fresh, so changes made while the monitor was down are only caught for mints it has seen before. If an authority changes and changes back while the monitor is off, it is not seen.
 - Alerts do not include a transaction signature. They link to the mint on Solana Explorer instead.
 - Classic SPL Token mints only. Token-2022 mints are rejected.
 - The watchlist is read from `scripts/watched_mints.json`, **not** from the on-chain program in this repo (see Part 2).

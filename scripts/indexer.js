@@ -77,6 +77,7 @@ const BASELINE_RETRY_MS = 3_000;
 
 // Anchored to this file's folder, not the directory node was launched from.
 const WATCHED_MINTS_FILE = path.join(__dirname, "watched_mints.json");
+const BASELINE_FILE = path.join(__dirname, ".baseline.json"); // gitignored
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -189,6 +190,73 @@ function parseMint(account) {
   };
 }
 
+// --- Saved baseline -----------------------------------------------------------
+// The last known authority state per mint is saved to scripts/.baseline.json
+// (gitignored, mint addresses only, no secrets). On restart it is compared with
+// the chain, so a change made while the monitor was down still raises an alert.
+const persisted = {}; // mint address -> { mintAuthority, freezeAuthority }
+let baselineDirty = false;
+let warnedSaveFailure = false;
+
+function isValidAuthority(value) {
+  return value === null || (typeof value === "string" && value.length > 0);
+}
+
+function isValidSavedState(s) {
+  return (
+    s !== null &&
+    typeof s === "object" &&
+    isValidAuthority(s.mintAuthority) &&
+    isValidAuthority(s.freezeAuthority)
+  );
+}
+
+function loadSavedBaseline() {
+  if (!fs.existsSync(BASELINE_FILE)) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(BASELINE_FILE, "utf8"));
+  } catch (err) {
+    console.error("SAVED BASELINE UNREADABLE, starting fresh (changes while down are missed):", err.message);
+    return;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    console.error("SAVED BASELINE HAS THE WRONG SHAPE, starting fresh (changes while down are missed).");
+    return;
+  }
+  for (const [address, saved] of Object.entries(parsed)) {
+    if (isValidSavedState(saved)) {
+      persisted[address] = {
+        mintAuthority: saved.mintAuthority,
+        freezeAuthority: saved.freezeAuthority,
+      };
+    } else {
+      console.error("Ignoring invalid saved baseline entry for", address);
+    }
+  }
+}
+
+// Writes only when something changed. Atomic: write a temp file, then rename it.
+// A failed save is reported once and retried on the next poll. It never stops polling.
+function flushBaseline() {
+  if (!baselineDirty) return;
+  const tmp = BASELINE_FILE + ".tmp";
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(persisted, null, 2) + "\n");
+    fs.renameSync(tmp, BASELINE_FILE);
+    baselineDirty = false;
+    warnedSaveFailure = false;
+  } catch (err) {
+    if (!warnedSaveFailure) {
+      warnedSaveFailure = true;
+      console.error(
+        "BASELINE SAVE FAILED (changes made while the monitor is down may be missed):",
+        describeError(err)
+      );
+    }
+  }
+}
+
 // --- State ---------------------------------------------------------------------
 const state = new Map(); // mint address -> { mintAuthority, freezeAuthority }
 const warnedUnreadable = new Set(); // report an unreadable mint once, not every poll
@@ -240,15 +308,19 @@ function describeAuthority(value) {
   return value === null ? "none" : value;
 }
 
-function raiseAlert(mintAddress, changes) {
+// atStartup: the change was found on the first read after a restart, so it
+// happened while the monitor was not running.
+function raiseAlert(mintAddress, changes, atStartup) {
   stats.alerts++;
   const detected = new Date().toISOString();
   const explorer = `https://explorer.solana.com/address/${mintAddress}?cluster=devnet`;
+  const startupNote = "Changed while Aegis was not running (found at startup).";
 
   // Terminal alert always prints first, whatever Telegram does.
   console.log("\n🚨 ALERT: Authority change on watched mint!");
   console.log("Mint:", mintAddress);
   for (const change of changes) console.log("  -", change);
+  if (atStartup) console.log(startupNote);
   console.log("Detected:", detected);
   console.log(`Explorer: ${explorer}\n`);
 
@@ -256,6 +328,7 @@ function raiseAlert(mintAddress, changes) {
     "🚨 Aegis alert: authority change (devnet)",
     `Mint: ${mintAddress}`,
     ...changes.map((c) => `- ${c}`),
+    ...(atStartup ? [startupNote] : []),
     `Detected: ${detected}`,
     `Explorer: ${explorer}`,
   ];
@@ -269,6 +342,8 @@ const FIELDS = [
 
 // isBaseline: the first read must succeed for every mint, or we crash. After that,
 // an unreadable mint is reported once and skipped until it becomes readable again.
+// At baseline time, state was pre-filled from the saved baseline, so a difference
+// here means the authority changed while the monitor was down.
 function applyAccounts(mints, accounts, isBaseline) {
   for (const m of mints) {
     let current;
@@ -289,8 +364,8 @@ function applyAccounts(mints, accounts, isBaseline) {
     warnedUnreadable.delete(m.address);
 
     const previous = state.get(m.address);
+    const changes = [];
     if (previous) {
-      const changes = [];
       for (const [field, label] of FIELDS) {
         if (previous[field] !== current[field]) {
           changes.push(
@@ -298,9 +373,14 @@ function applyAccounts(mints, accounts, isBaseline) {
           );
         }
       }
-      if (changes.length > 0) raiseAlert(m.address, changes);
+      if (changes.length > 0) raiseAlert(m.address, changes, isBaseline);
     }
     state.set(m.address, current);
+
+    if (!previous || changes.length > 0) {
+      persisted[m.address] = current;
+      baselineDirty = true;
+    }
   }
 }
 
@@ -318,21 +398,37 @@ async function main() {
   console.log("HTTP host:", new URL(RPC_URL).host);
   console.log(`Watching ${mints.length} mint(s), polling every ${POLL_INTERVAL_MS / 1000}s.`);
 
+  // Pre-fill state from the saved baseline for the mints we watch now.
+  loadSavedBaseline();
+  const restored = new Set();
+  for (const m of mints) {
+    if (persisted[m.address]) {
+      state.set(m.address, { ...persisted[m.address] });
+      restored.add(m.address);
+    }
+  }
+
   applyAccounts(mints, await fetchBaselineAccounts(connection, mints), true);
   lastSuccessAt = Date.now();
+  flushBaseline();
 
   console.log("Baseline recorded:");
   for (const m of mints) {
     const s = state.get(m.address);
     console.log(
       `  ${m.address}  mint authority: ${describeAuthority(s.mintAuthority)}  ` +
-        `freeze authority: ${describeAuthority(s.freezeAuthority)}`
+        `freeze authority: ${describeAuthority(s.freezeAuthority)}  ` +
+        `(${restored.has(m.address) ? "saved baseline checked" : "new baseline"})`
     );
   }
   console.log("Monitoring for authority changes...\n");
 
   // Proves the Telegram path at boot instead of discovering it is broken at alert time.
-  notify(`Aegis started: watching ${mints.length} mint(s) on devnet.`, "startup");
+  notify(
+    `Aegis started: watching ${mints.length} mint(s) on devnet ` +
+      `(${restored.size} with a saved baseline).`,
+    "startup"
+  );
 
   let lastStatsAt = Date.now();
   while (true) {
@@ -345,6 +441,7 @@ async function main() {
       stats.failed++;
       console.error("POLL FAILED:", describeError(err));
     }
+    flushBaseline();
 
     const now = Date.now();
     if (now - lastSuccessAt > NO_SUCCESS_LIMIT_MS) {
